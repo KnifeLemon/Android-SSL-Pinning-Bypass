@@ -52,3 +52,6 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# local MCP / RE tooling config
+.mcp.json

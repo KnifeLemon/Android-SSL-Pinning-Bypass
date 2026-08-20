@@ -1,6 +1,11 @@
 'use strict';
-// Instagram / Meta (Tigon-MNS) SSL-pinning bypass. Run at startup (frida spawn
-// or a startup-loaded gadget). Technique credit: takaotr (frida codeshare).
+// Instagram / Meta (Tigon-MNS) SSL-pinning bypass for pre-444 builds.
+// Run at startup (frida spawn, a startup-loaded gadget, or attach via run.py).
+//
+// NOTE: Instagram v444+ moved the real pinning into the native MNS/Fizz stack,
+// which this script does NOT cover. For modern Instagram use
+// ../frida/instagram_v444_bypass.js (a superset of this file).
+// Technique credit: takaotr (frida codeshare).
 
 var hooked = false;   // guarded so initHybrid is hooked exactly once
 

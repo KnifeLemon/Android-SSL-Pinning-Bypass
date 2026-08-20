@@ -3,7 +3,7 @@
 ![Platform](https://img.shields.io/badge/platform-Android-3ddc84)
 ![Frida](https://img.shields.io/badge/Frida-17.x-e91e63)
 ![Methods](https://img.shields.io/badge/methods-Frida%20%2B%20APK%20patch-blue)
-![Tested](https://img.shields.io/badge/tested-Instagram%20v442.0.0.0.61-8a3ab9)
+![Tested](https://img.shields.io/badge/tested-Instagram%20v444.0.0.0.77-8a3ab9)
 ![Use](https://img.shields.io/badge/use-authorized%20testing%20only-red)
 
 Bypass **SSL pinning** on Android to inspect an app's HTTPS traffic during **authorized**
@@ -61,17 +61,23 @@ self-contained APK → use **Patch**. For **Instagram/Facebook/Threads/Messenger
 
 ### Frida scripts — which one?
 
-Both are generic at heart (they hook `SSLContext` / `X509TrustManager` / Conscrypt), so
-they are **not** Instagram-only. The difference is Tigon coverage:
+All three are generic at heart (they hook `SSLContext` / `X509TrustManager` / Conscrypt),
+so they are **not** Instagram-only. They differ in how much of Meta's newer pinning they
+cover, which has changed as Instagram evolved:
 
 | Script | Covers | Use for |
 |---|---|---|
-| **`frida/tigon_bypass.js`** | Meta **Tigon** stack **+** generic Conscrypt/SSLContext | Instagram/Facebook/Threads/Messenger **and** ordinary apps — safe default |
-| `frida/generic-ssl-unpinning.js` | generic Conscrypt/SSLContext **+ older Meta `liger`** (no Tigon) | ordinary apps + pre-Tigon Meta builds; **won't** decrypt modern Instagram's main API traffic |
+| **`frida/instagram_v444_bypass.js`** | Meta **MNS/Fizz** native pinning (v444+) **+** legacy **Tigon** config **+** generic Conscrypt/SSLContext | **Current Instagram / Facebook / Threads / Messenger** and ordinary apps — the safe default |
+| `frida/tigon_bypass.js` | legacy **Tigon** config **+** generic Conscrypt/SSLContext | **pre-v444** Instagram / other Tigon-based Meta apps, and ordinary apps |
+| `frida/generic-ssl-unpinning.js` | generic Conscrypt/SSLContext **+** older Meta `liger` (no Tigon) | ordinary apps + pre-Tigon Meta builds; **won't** decrypt modern Instagram's main API traffic |
 
-→ **Just use `tigon_bypass.js`** — it's a superset. For very broad coverage of unusual
-stacks (Flutter, unusual OkHttp setups), a community "universal unpinning" script is a
-good complement.
+→ **Just use `instagram_v444_bypass.js`** — it's a superset of the other two and works on
+both current and older Instagram. `tigon_bypass.js` is kept for people already on the older
+build who want the minimal hook. Around **v444** Instagram moved its real pinning into the
+native **MNS/Fizz** stack — the older config-only hook no longer decrypts its main traffic,
+which is why the v444 script exists (details in the deep-dive below). For very broad coverage
+of unusual stacks (Flutter, unusual OkHttp setups), a community "universal unpinning" script
+is a good complement.
 
 ### `patch.py` — capabilities
 
@@ -96,9 +102,10 @@ patchapk/
 │   ├── GUIDE-patch.md                 #   static patch method (Windows setup + test)
 │   └── INSTAGRAM-ANALYSIS.md                    #   analysis writeup + architecture diagrams
 ├── frida/                             # runtime hook scripts + runner
-│   ├── tigon_bypass.js               #   Meta/Tigon + generic bypass  ← use this
+│   ├── instagram_v444_bypass.js      #   v444+ MNS/Fizz + Tigon + generic  ← use this
+│   ├── tigon_bypass.js               #   pre-v444 Tigon + generic bypass
 │   ├── generic-ssl-unpinning.js      #   generic + older Meta liger (no Tigon); Eltion
-│   └── run.py                        #   spawn+inject runner (if `frida -f` times out)
+│   └── run.py                        #   launch+inject runner (if `frida -f` times out)
 └── patcher/                           # static patch/repackage tool
     ├── patch.py                       #   CLI
     ├── config.py                      #   tunable settings
@@ -114,16 +121,17 @@ patchapk/
 
 | | |
 |---|---|
-| Target app | **Instagram for Android v442.0.0.0.61** (analysis/decompile from the v440.x build) |
+| Target app | **Instagram for Android v444.0.0.0.77** (native MNS/Fizz pinning) — also v442.0.0.0.61 |
 | Architecture | **x86_64** |
 | OS | Android **12** (API 31), rooted emulator |
 | Frida | frida-server **17.16.4** (x86_64) + frida-tools **17.16.4**, Python **3.13** |
 | Patch toolchain | APKEditor **1.4.9**, SDK build-tools **r30.0.1**, JDK **17** |
-| Result | `frida -f … -l frida/tigon_bypass.js` → pinning bypassed, traffic decrypted in Burp ✅ |
+| Result | `py -3.13 frida/run.py … frida/instagram_v444_bypass.js` → pinning bypassed, traffic decrypted in Burp ✅ |
 
-> `tigon_bypass.js` uses `initHybrid` overload auto-detection, so it is expected to work
-> across Instagram versions (and other Tigon-based Meta apps) on both x86_64 and arm64 —
-> only `frida-server` and the client must match your device's architecture.
+> `instagram_v444_bypass.js` hooks the per-connection MNS verifier by name and auto-detects
+> the Tigon `initHybrid` overloads, so it is expected to hold across the v44x series (and
+> other Tigon/MNS-based Meta apps) on both x86_64 and arm64 — only `frida-server` and the
+> client must match your device's architecture.
 
 ---
 

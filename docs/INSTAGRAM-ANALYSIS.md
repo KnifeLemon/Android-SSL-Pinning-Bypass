@@ -9,11 +9,14 @@ and the result.
 >
 > | | |
 > |---|---|
-> | App (bypass verified) | **Instagram for Android v442.0.0.0.61** |
+> | App (bypass verified) | **v444.0.0.0.77** (native MNS/Fizz) and **v442.0.0.0.61** (Tigon config) |
 > | App (decompiled for details) | a **v440.x** build (class names / smali below) |
 > | ABI | **x86_64** |
 > | OS / device | Android **12** (API 31), rooted emulator |
 > | Date | 2026-08 |
+>
+> Instagram **v444** changed where pinning is enforced (native MNS/Fizz, see the update
+> section below). The Tigon analysis further down still describes the pre-v444 mechanism.
 >
 > Instagram ships new builds constantly and re-obfuscates aggressively. So treat this as
 > **version-specific**:
@@ -33,11 +36,16 @@ and the result.
 - Instagram's real pinning is **not** OkHttp `CertificatePinner`, and there is **no**
   `libinstagram.so`. Those (widely reposted in AI-generated blogs) **do not exist** in the
   real app.
-- The real network stack is **Tigon / MNS** (Meta's cronet-based stack). Cert verification
-  is turned on inside a **Java config** passed to `TigonMNSServiceHolder.initHybrid(...)`.
-- The reliable bypass is a **Frida hook on `initHybrid`, installed at startup via spawn**.
+- **v444+ (current):** pinning moved into the **native MNS/Fizz TLS stack** (`libstartup.so`).
+  It delegates the cert check to a **Java** verifier over JNI —
+  `com.facebook.mobilenetwork.internal.certificateverifier.CertificateVerifier` — so the
+  bypass is to **no-op its `verify()` / `verifyWithProofOfPossession()`**. Per-connection, so
+  a late attach works. → `instagram_v444_bypass.js`.
+- **pre-v444:** the network stack is **Tigon / MNS**; cert verification is turned on inside a
+  **Java config** passed to `TigonMNSServiceHolder.initHybrid(...)`, hooked at startup. →
+  `tigon_bypass.js`.
 - Static approaches (network-security-config, Frida-gadget injection) **fail** on Instagram
-  because of SoLoader/Superpack packaging + the Tigon layer.
+  because of SoLoader/Superpack packaging + the native TLS layer.
 
 ---
 
@@ -55,7 +63,75 @@ Everything was verified against the **real decompiled APK** — not assumed from
 
 ---
 
-## Where the pinning actually lives
+## v444: pinning moved to the native MNS/Fizz stack
+
+On **v444.0.0.0.77** the pre-v444 Tigon-config bypass stopped working — the app opened but
+every request failed and it got stuck on a *"문제가 발생했습니다 / Something went wrong"*
+config-load screen. `adb logcat` showed the real reason:
+
+```
+PLog: Fetch failed: ... network error: TransientError
+      domain: MNSSecureTCP code: 4
+      detail: fizzy_client_connect(): Pin verification failed (-0x0001)
+```
+
+So on v444 the cert check happens in the **native MNS/Fizz TLS stack** (`libstartup.so`,
+namespace `crossapp::tigonhttp3::mns` / `facebook::distribgw::client`), not in the Java
+Tigon config. That explains why the old hook no longer helped: its target
+`TigonMNSServiceHolder.initHybrid` **is never even called** on v444, and the native config
+(`MNSDGWNetworkStackConfig`, with `trustSandboxCertificates:false`) is a native struct.
+
+### What was ruled out (before finding the real hook)
+
+Each of these was hooked and confirmed **not** to intercept the failing MNS connection:
+
+| Hook attempted | Result |
+|---|---|
+| Java `TigonMNSServiceHolder.initHybrid` config setters | never called on v444 |
+| Java `TigonMNSConfig` setters / getters (even at VM-init via wait-for-debugger) | class never constructed for this path |
+| Native `proxygen::SSLVerification::verifyWithMetrics` (the old `liger` hook, now in `libstartup.so`) | never called |
+| Native `RetinaCertificateVerifier::verify` (via the relative-vtable) | never called |
+| Native `fizz::client::ClientStateMachine::processConnect` — verifier arg nulled | pin still enforced |
+| Native `X509_verify_cert` forced to succeed | never called (MNS pin isn't OpenSSL) |
+
+The pin check is Meta's own logic in native MNS code, independent of fizz's verifier,
+OpenSSL, and all Java config.
+
+### The actual hook point
+
+The native MNS code doesn't verify the certificate itself — it **calls back into Java over
+JNI, once per connection**, using:
+
+```
+com.facebook.mobilenetwork.internal.certificateverifier.CertificateVerifier
+    void verify(byte[][] chain, String host)
+    void verify(byte[][] chain, String host, boolean)
+    void verifyWithProofOfPossession(byte[][] chain, String host, boolean, int, byte[], byte[])
+```
+
+These return `void` and **throw on a pin mismatch**, so making them no-ops turns pinning
+off. Because they run per connection (not once at startup), the hook works even when
+attached slightly late — no spawn/gadget timing needed.
+
+```mermaid
+flowchart TD
+    A["MNS/Fizz TLS handshake<br/>(native libstartup.so)"] --> B["JNI upcall:<br/>CertificateVerifier.verify(chain, host)"]
+    B --> C{pin match?}
+    C -- "no (normal)" --> D["throw → fizzy_client_connect():<br/>Pin verification failed (-0x0001)"]
+    C -- "yes" --> E[handshake continues]
+    B -. "Frida: verify() → no-op (never throws)" .-> E
+    classDef ok fill:#1f6f43,stroke:#0d3,color:#fff;
+    class E ok
+```
+
+**Result:** with `verify*` neutralized, no more `Pin verification failed`, dozens of TCP
+connections established to the proxy, and Instagram loads its account/feed data normally —
+traffic decrypted in Burp. This is what `instagram_v444_bypass.js` does (it also keeps the
+pre-v444 Tigon and Conscrypt hooks below, so it stays a superset).
+
+---
+
+## Where the pinning actually lives (pre-v444 Tigon)
 
 ```mermaid
 flowchart TD

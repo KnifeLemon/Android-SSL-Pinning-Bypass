@@ -39,11 +39,18 @@ import time
 import frida
 import frida_tools
 
+# Make console output UTF-8-safe on non-UTF-8 consoles (e.g. Korean cp949 on
+# Windows), so script logs / status lines never crash with UnicodeEncodeError.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ADB = os.environ.get("ADB", "adb")
 pkg = sys.argv[1] if len(sys.argv) > 1 else "com.instagram.android"
 script_paths = sys.argv[2:] or [os.path.join(HERE, "instagram_v444_bypass.js")]
-# frida 17 doesn't expose the Java bridge to raw scripts — bundle the one shipped
+# frida 17 doesn't expose the Java bridge to raw scripts - bundle the one shipped
 # with frida-tools so `Java.*` works in every script.
 bridge_path = os.path.join(os.path.dirname(frida_tools.__file__), "bridges", "java.js")
 BRIDGE = open(bridge_path, encoding="utf-8").read() + "\n;globalThis.Java = bridge;\n"
@@ -64,17 +71,38 @@ def adb(*args):
     return subprocess.run([ADB, *args], capture_output=True, text=True).stdout.strip()
 
 
-def launch_and_get_pid(package, tries=150):
-    """Cold-launch the app via adb and return its main pid as soon as it appears."""
+def launch_and_get_pid(package, timeout=25.0):
+    """Cold-launch the app via adb and return its main pid as soon as it appears.
+
+    Polls by wall-clock time (not a fixed iteration count) so a slow first launch
+    doesn't fail spuriously. Re-issues the launch intent partway through in case the
+    first monkey/am call didn't take.
+    """
     adb("shell", "am", "force-stop", package)
     time.sleep(0.5)
     adb("shell", "monkey", "-p", package, "-c", "android.intent.category.LAUNCHER", "1")
-    for _ in range(tries):                        # ~4.5s max; pidof's first pid is the main process
-        out = adb("shell", "pidof", package)
+    deadline = time.time() + timeout
+    relaunched = False
+    while time.time() < deadline:
+        out = adb("shell", "pidof", package)      # pidof's first pid is the main process
         if out:
             return int(out.split()[0])
-        time.sleep(0.03)
+        if not relaunched and time.time() > deadline - timeout / 2:
+            adb("shell", "monkey", "-p", package, "-c", "android.intent.category.LAUNCHER", "1")
+            relaunched = True
+        time.sleep(0.1)
     return None
+
+
+SERVER_HINT = (
+    "[x] frida-server isn't running on the device (frida fell back to 'jailed' mode).\n"
+    "    Start it (from PowerShell, not Git Bash, so the path isn't mangled):\n"
+    "      adb root\n"
+    "      adb push frida-server /data/local/tmp/frida-server   # if it's missing after a wipe/reboot\n"
+    "      adb shell \"chmod 755 /data/local/tmp/frida-server\"\n"
+    "      adb shell \"/data/local/tmp/frida-server -D\"\n"
+    "    Then re-run this script."
+)
 
 
 def start(dev):
@@ -83,8 +111,12 @@ def start(dev):
         try:
             print(f"[*] spawning {pkg} ...")
             return dev.spawn([pkg]), True
-        except frida.TimedOutError:
-            print("[!] spawn timed out — falling back to launch + attach-by-pid")
+        except (frida.TimedOutError, frida.TransportError) as e:
+            # spawn-gating is broken/slow on some emulators (LDPlayer): times out, or
+            # the transport itself times out. Either way, fall back to attach-by-pid.
+            print(f"[!] spawn failed ({type(e).__name__}) - falling back to launch + attach-by-pid")
+        except frida.NotSupportedError:
+            raise SystemExit(SERVER_HINT)          # 'need Gadget on jailed Android' = server down
     pid = launch_and_get_pid(pkg)
     if pid is None:
         raise SystemExit(f"[x] could not find a running pid for {pkg} (is adb on PATH? set ADB=...)")
@@ -95,7 +127,10 @@ def start(dev):
 def main():
     dev = frida.get_usb_device(timeout=10)
     pid, spawned = start(dev)
-    session = dev.attach(pid)                      # attach by pid works even when by-name doesn't
+    try:
+        session = dev.attach(pid)                  # attach by pid works even when by-name doesn't
+    except frida.NotSupportedError:
+        raise SystemExit(SERVER_HINT)
 
     scripts = []                                  # keep references alive
     for path in script_paths:

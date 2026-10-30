@@ -28,19 +28,35 @@
  */
 
 // ---- 1) v444+ MNS/Fizz native pinning (the effective layer on modern Instagram) ----
-Java.perform(function () {
-    try {
-        var CV = Java.use("com.facebook.mobilenetwork.internal.certificateverifier.CertificateVerifier");
+// The CertificateVerifier class loads a moment into startup, so with a fast attach it
+// may not exist yet at script load. Retry until it appears, then hook exactly once.
+var mnsHooked = false;
+
+function tryHookMNS() {
+    if (mnsHooked) return true;
+    var done = false;
+    Java.perform(function () {
+        var CV;
+        try { CV = Java.use("com.facebook.mobilenetwork.internal.certificateverifier.CertificateVerifier"); }
+        catch (e) { return; }              // class not loaded yet -> retry later
+        if (mnsHooked) return;
+        mnsHooked = true;
         try { CV.setTrustUserCertificates(); } catch (e) {}        // trust user-installed (proxy) CAs
         CV.verify.overloads.forEach(function (ol) { ol.implementation = function () { return; }; });
         try {
             CV.verifyWithProofOfPossession.overloads.forEach(function (ol) { ol.implementation = function () { return; }; });
         } catch (e) {}
         console.log("[+] MNS CertificateVerifier.verify* neutralized (v444+ pinning off)");
-    } catch (e) {
-        // class absent on older builds -> the Tigon / Conscrypt hooks below cover those
-    }
-});
+        done = true;
+    });
+    return done;
+}
+
+var mnsTries = 0;
+var mnsTimer = setInterval(function () {
+    if (tryHookMNS() || ++mnsTries > 400) clearInterval(mnsTimer);  // give up after ~20s (older builds)
+}, 50);
+tryHookMNS();
 
 // ---- 2) Legacy Tigon config (pre-444 Instagram / other Tigon-based Meta apps) ----
 var hooked = false;   // guarded so initHybrid is hooked exactly once

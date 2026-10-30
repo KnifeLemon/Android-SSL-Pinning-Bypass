@@ -121,7 +121,7 @@ patchapk/
 
 | | |
 |---|---|
-| Target app | **Instagram for Android v444.0.0.0.77** (native MNS/Fizz pinning) — also v442.0.0.0.61 |
+| Target app | **Instagram for Android v449.0.0.48.84** and **v444.0.0.0.77** (native MNS/Fizz pinning) — also v442.0.0.0.61 |
 | Architecture | **x86_64** |
 | OS | Android **12** (API 31), rooted emulator |
 | Frida | frida-server **17.16.4** (x86_64) + frida-tools **17.16.4**, Python **3.13** |
